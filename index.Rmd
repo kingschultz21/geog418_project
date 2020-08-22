@@ -1,0 +1,495 @@
+---
+title: "Social Disparities and the Environment"
+subtitle: "A Study of PM2.5 Pollution and Neighbourhood income in the Metro Vancouver Area"
+author: 'By: Connor Schultz'
+output: 
+  pdf_document:
+    citation_package: natbib
+bibliography: bibliography.bib
+geometry: margin = 1in
+fontsize: 12pt
+fig_caption: yes
+number_sections: true
+header-includes:
+    - \usepackage{setspace}\doublespacing
+    - \usepackage{float}
+---
+<!--------------------------------------------------------------------------------------------------------------------------------------->
+# 1 Introduction
+<!--------------------------------------------------------------------------------------------------------------------------------------->
+
+
+```{r loadlibs, warning=FALSE, message=FALSE, echo=FALSE}
+#Libraries
+library(sf)
+library(plyr)
+library(dplyr)
+library(spdep)
+library(GISTools)
+library(raster)
+library(maptools)
+library(rgdal)
+library(spatstat)
+library(sp)
+library(spgwr)
+library(spatstat)
+library(tmap)
+library(gstat)
+library(ggplot2)
+library(cartography)
+```
+
+```{r cwd, warning=FALSE, message=FALSE, echo=FALSE}
+# 
+#   Set current directory to working directory
+# 
+dir <- getwd()
+setwd(dir)
+```
+
+```{r data, warning=FALSE, message=FALSE, echo=FALSE}
+# 
+#   Read in initial data, preprocess and merge
+# 
+pm25 <- read.csv("tabular_data/PM25.csv")                       #read in particulate matter dataset  
+pm25 <- pm25[,1:2]                                              #select columns 1 and 2
+colnames(pm25) <- c("POSTALCODE", "PM25")                       #change the column names 
+pm25 <- na.omit(pm25)
+
+postalcodes <- shapefile("BC_postalcodes/BC_Postal_Codes")      #read in postal code shapefile
+
+income <- read.csv("tabular_data/Income.csv")                   #read in dissemination tract and income data
+colnames(income) <- c("DAUID", "Income")                        #select ID and Income columns
+
+census_tracts <- shapefile("BC_data/BC_DA.shp")                 #read in dissemination tract shapefile
+
+income_tracts <- merge(census_tracts,income, by = "DAUID")      #merge income and dissemination data
+income_tracts <- income_tracts[!is.na(income_tracts$Income),]   #remove na values
+```
+
+```{r joinmerge, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+# 
+#   Aggregate and Join PM2.5 and Income
+#     -> note: this code cell does not get evaluated for memory allocation reasons
+# 
+postal_codes <- intersect(postalcodes, income_tracts)                                         #select postal codes that fall within dissemination tracts  
+
+pm25_spatial <- merge(postal_codes,pm25,by = "POSTALCODE")                                    #merge PM2.5 data with postal code data
+
+pm25_aggregate_t <- aggregate((as.numeric(pm25_spatial$PM25)/10)~pm25_spatial$DAUID,FUN=max)    #aggregate the PM2.5 values in each DA in order to have a single value per DA. aggregate based on max.
+colnames(pm25_aggregate_t) <- c("DAUID", "PM25AGG")                                             #select ID and Income columns
+
+income_pm25 <- merge(income_tracts,pm25_aggregate_t, by = "DAUID")                              #merge income and dissemination data
+
+pm25points_aggregate_t <- merge(pm25_spatial, pm25_aggregate_t, by = "DAUID")                     #re-join aggregated data to the pm25.spatial points layer. 
+
+out_dir <- paste0(dir,"/project_data")
+writeOGR(pm25points_aggregate_t, dsn=out_dir, layer="pm25_aggregate", driver="ESRI Shapefile")  #write to shapefile [MORE EFFCIENT]
+writeOGR(income_pm25, dsn=out_dir, layer="pm25_income", driver="ESRI Shapefile")              #write to shapefile [MORE EFFCIENT]
+```
+
+```{r subsample, warning=FALSE, message=FALSE, echo=FALSE}
+# 
+#   Read in shapefiles created previously and
+#   create a sub-sample of points as per project spec. (290 points)
+# 
+pm25points_aggregate <- shapefile("project_data/pm25_aggregate")                              #read in pm2.5 aggregated spatial points layer
+income_pm25 <- shapefile("project_data/pm25_income")                                          #read in merged income and pm2.5 spatial polygon layer
+income_pm25 <- income_pm25[!is.na(income_pm25$PM25AGG),]                                      #remove na values
+
+connor_sample = 290
+spSample <- pm25points_aggregate[sample(1:length(pm25points_aggregate),connor_sample),]       #create sub-sample of points 
+spSample$X <- coordinates(spSample)[,1]                                                     #add x coordinates (longitude)
+spSample$Y <- coordinates(spSample)[,2]                                                     #add y coordinates (latitude)
+
+regions <- read_sf("project_data", "pm25_income")                                           #read in merged income and pm2.5 spatial polygon layer
+regions$area <- st_area(regions)                                                            #load from sf
+border <- regions %>% summarise(area = sum(area))                                           #convert to outer border polygon
+border <- as_Spatial(border)                                                                #convert to spdf
+
+border$X <- coordinates(border)[,1]
+border$Y <- coordinates(border)[,2]
+```
+
+```{r studymap, warning=FALSE, message=FALSE, echo=FALSE, dpi=100, fig.align="center", fig.cap="Study Area Map of Metro Vancouver"}
+# 
+#   Study Area map of Vancouver
+#
+van_boundaries <- shapefile("van_data/AdminBoundary")
+study_map <- tm_shape(border) +
+                tm_borders("blue",2) +
+                tm_fill("grey", alpha=0.5) +
+             tm_shape(van_boundaries) +
+                tm_borders("black", alpha = 0.5) +
+                tm_text("ShortName", size =0.5) +
+             tm_layout(title = "Study Area Map of Metro Vancouver", title.bg.color = "grey", title.bg.alpha=0.75)
+study_map
+```
+
+```{r choromap, warning=FALSE, message=FALSE, echo=FALSE, dpi=125, fig.align="center", fig.cap="Median Income Map of Metro Vancouver per Dissemenation Area"}
+# 
+#   Create choropleth map of Median Income in Vancouver
+# 
+medInc_map <- tm_shape(income_tracts) + 
+  tm_polygons(col = "Income", 
+              title = "Median Income (CAD)", 
+              style = "jenks", 
+              palette = "inferno", n = 5) 
+medInc_map
+```
+
+```{r sampleplot, echo=FALSE, dpi=125, fig.align="center", fig.cap="Plot of Sub-Sampled Points and PM2.5 values"}
+# 
+#   Sub-sample plot of PM2.5 values
+#
+spSample %>% as.data.frame %>% 
+  ggplot(aes(X, Y)) + geom_point(aes(size=PM25AGG), color="blue", alpha=0.25) +
+  ggtitle("PM 2.5 Concentration (ppm)") + coord_equal() + theme_bw()
+```
+
+
+```{r initgrid, warning=FALSE, message=FALSE, echo=FALSE}
+# 
+#   Initialize interpolation grid
+# 
+num_cells = 5000
+grd <- as.data.frame(spsample(spSample, "regular", n=num_cells))
+names(grd)       <- c("X", "Y")
+coordinates(grd) <- c("X", "Y")
+gridded(grd)     <- TRUE                                          #create SpatialPixel object
+fullgrid(grd)    <- TRUE                                          #create SpatialGrid object
+proj4string(grd) <- proj4string(spSample)
+```
+
+```{r morans, warning=FALSE, message=FALSE, echo=FALSE}
+# 
+#   MORANS I STATISTIC
+# 
+van_nb <- poly2nb(income_pm25)                                               #construct a neighbours list from dissemenation tracts 
+van_lw <- nb2listw(van_nb, zero.policy = TRUE, style = "W")                    #supplement neighbours list with weights
+#print.listw(van_lw, zero.policy = TRUE)                                       #print information about weights
+
+# Global Morans I
+income_mi <- moran.test(income_pm25$Income, van_lw, zero.policy = TRUE)        #Morans I test for spatial autocorrelation (income)
+
+pm25_mi <- moran.test(income_pm25$PM25AGG, van_lw, zero.policy = TRUE)         #Morans I test for spatial autocorrelation (pm2.5)
+
+# Local Morans I
+lisa.test <- localmoran(income_pm25$Income, van_lw)                            #Local Morans I (income)
+income_pm25$income_li <- lisa.test[,1]
+income_pm25$income_E.li<- lisa.test[,2]
+income_pm25$income_Var_li<- lisa.test[,3]
+income_pm25$income_Z.li<- lisa.test[,4]
+income_pm25$income_pval<- lisa.test[,5]
+
+lisa.test <- localmoran(income_pm25$PM25AGG, van_lw)                           #Local Morans I (pm2.5)
+income_pm25$pm25_li <- lisa.test[,1]
+income_pm25$pm25_E.li<- lisa.test[,2]
+income_pm25$pm25_Var_li<- lisa.test[,3]
+income_pm25$pm25_Z.li<- lisa.test[,4]
+income_pm25$pm25_pval<- lisa.test[,5]
+
+```
+
+```{r interpolation, warning=FALSE, message=FALSE, echo=FALSE, results="hide"}
+#
+#   SPATIAL INTERPOLATION: KRIGING
+#
+f.1 <- as.formula(PM25AGG ~ X + Y)                                        #define trend
+
+var.smpl <- variogram(f.1, spSample, cloud = FALSE)                       #compute the sample variogram  
+
+dat.fit <- fit.variogram(var.smpl, fit.ranges = TRUE, fit.sills = TRUE,   #compute the variogram model
+                         vgm(model = "Sph"))
+
+dat.krg <- krige(f.1, spSample, grd, dat.fit)                             #perform kriging interpolation
+
+kr <- raster(dat.krg)                                                     #convert kriged surface to a raster object
+kr.m <- mask(kr, census_tracts)                                           #mask raster with dissemenation tracts
+```
+
+
+```{r combine, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+#
+#   Combine income data with interpolated surface
+#
+agg_rast <- aggregate(kr.m, fact = 1 ,fun=mean)                                        #aggregate raster
+
+crs <- crs(income_tracts)                                                              #define crs
+
+rast_pts <-  rasterToPoints(agg_rast,fun=NULL, spatial=FALSE, crs = crs)               #convert the raster dataset to points
+pts_df <- as.data.frame(rast_pts)                                                      #convert the point dataset to a spatial dataframe
+
+coords <- pts_df[,c("x", "y")]                                                         #assign coordinates to a new object
+coords
+
+pts_spdf <- SpatialPointsDataFrame(coords = coords, data = pts_df, proj4string = crs)  #create a spatial points dataframe
+pts_tracts <- aggregate(x=pts_spdf, by=income_tracts, FUN=mean)                        #aggregate points into census tracts
+pm.income.poly <- intersect(pts_tracts, income_tracts)                                 #get the intersection of aggregated tracts income tracts
+names(pm.income.poly)[names(pm.income.poly) == 'var1.pred'] <- 'PM25_pred'
+
+out_dir <- paste0(dir,"/project_data")
+writeOGR(pm.income.poly, dsn=out_dir, layer="pm_income_poly", driver="ESRI Shapefile")              #write to shapefile [MORE EFFCIENT]                                
+```
+
+```{r regression, warning=FALSE, message=FALSE, echo=FALSE, results = "hide"}
+#
+#   LINEAR REGRESSION
+#
+#plot(pm.income.poly$Income~pm.income.poly$PM25_pred)                 #plot income and predicted PM2.5
+pm.income.poly <- shapefile("project_data/pm_income_poly") 
+#pm.income.poly <-  pm.income.poly[pm.income.poly$var1.pred != 0,]
+pm.income.poly <- pm.income.poly[!is.na(pm.income.poly$PM25_pred),]   #remove na values
+
+lm.model <- lm(pm.income.poly$Income~pm.income.poly$PM25_pred)        #perform a linear regression on the two variables. DECIDE INDEPENDENT 
+lm.model
+model.resids <- as.data.frame(residuals.lm(lm.model))                 #obtain the residuals from the model
+pm.income.poly$residuals <- residuals.lm(lm.model)                    #add the residuals to the spatialpolygon dataframe
+```
+
+
+```{r moranresiduals, warning=FALSE, message=FALSE, echo=FALSE}
+# 
+#   MORANS I STATISTIC of LINEAR REGRESSION residuals
+# 
+res_nb <- poly2nb(pm.income.poly)
+res_lw <- nb2listw(res_nb, zero.policy = TRUE, style = "W")
+#print.listw(res_lw, zero.policy = TRUE)
+
+# Global Morans I
+res_mi <- lm.morantest(lm.model, res_lw, zero.policy = TRUE)
+```
+
+```{r gwr, warning=FALSE, message=FALSE, echo=FALSE}
+# 
+#   GEOGRAPHICALLY WEIGHTED REGRESSION
+# 
+pm.income.poly.coords <- coordinates(pm.income.poly)                                                 #add the polygon coordinates to the spatialpolygondataframe
+pm.income.poly$X <- pm.income.poly.coords[,1]
+pm.income.poly$Y <- pm.income.poly.coords[,2]
+
+#Determine the bandwidth for GWR
+GWRbandwidth <- gwr.sel(pm.income.poly$Income~pm.income.poly$PM25_pred, 
+                       data=pm.income.poly, coords=cbind(pm.income.poly$X,pm.income.poly$Y),adapt=T) 
+
+#Perform GWR on the two variables with the bandwidth determined above
+gwr.model = gwr(pm.income.poly$Income~pm.income.poly$PM25_pred, 
+                data=pm.income.poly, coords=cbind(pm.income.poly$X,pm.income.poly$Y), 
+                adapt=GWRbandwidth, hatmatrix=TRUE, se.fit=TRUE) 
+gwr.model                                                                                            #print the results of the model
+
+results<-as.data.frame(gwr.model$SDF)                                                                #results in detail
+
+pm.income.poly$localr <- results$localR2                                                             #add local r-square values to spdf 
+
+pm.income.poly$coeff <- results$pm.income.poly.PM25_pred                                             #add coefficient values to spdf 
+```
+
+```{r ppa, warning=FALSE, message=FALSE, echo=FALSE}
+#
+#   POINT PATTERN ANALYSIS
+#
+pts <- as.ppp(spSample)                                                                     #covert sample points to ppp object
+Window(pts) <- as.owin(border)                                                              #set window to that of study area
+marks(pts) <- NULL                                                                          #mark points to NULL as we are only concerned about distribution
+pts.km <- rescale(pts, 1000, "km")                                                          #rescale points to the KM level
+#
+#   K function
+#
+K <- Kest(pts.km)
+#
+#   L function
+#
+L <- Lest(pts.km)
+#
+#   KNN
+#
+knn <- apply(nndist(pts.km, k=1:100),2,FUN=mean)
+#
+#   ANN
+#
+ann.p <- mean(nndist(pts.km, k=1))                                                     #observed ann distance
+
+n     <- 599L                                                                          #number of simulations
+ann.r <- vector(length = n)                                                            #empty object used to store simulated ANN values
+for (i in 1:n){
+  rand.p   <- rpoint(n=pts.km$n, win=pts$window)                                       #generate random point locations
+  ann.r[i] <- mean(nndist(rand.p, k=1))                                                #tally the ANN values
+}
+
+N.greater <- sum(ann.r > ann.p)
+```
+
+
+```{r incmoranplot, echo=FALSE, error=FALSE, message=FALSE, warning=FALSE, dpi = 100, fig.align="center", fig.cap="Moran Plot of Median Income versus Spatially Lagged Median Income"}
+# 
+#   Create Moran plot of income versus spatially lagged income
+# 
+moran.plot(income_pm25$Income, van_lw, zero.policy=TRUE, spChk=NULL, labels=NULL, xlab="Median Income", 
+           ylab="Spatially Lagged Median Income", quiet=NULL)
+```
+
+
+```{r pm25moranplot, echo=FALSE, error=FALSE, message=FALSE, warning=FALSE, dpi = 100, fig.align="center", fig.cap="Moran Plot of PM2.5 versus Spatially Lagged PM2.5"}
+# 
+#   Create Moran plot of pm2.5 versus spatially lagged pm2.5
+# 
+moran.plot(income_pm25$PM25AGG, van_lw, zero.policy=TRUE, spChk=NULL, labels=NULL, xlab="PM2.5 (ppm)", 
+           ylab="Spatially Lagged PM2.5 (ppm)", quiet=NULL)
+```
+
+
+```{r incmoranmap, warning=FALSE, message=FALSE, echo=FALSE, dpi = 100, fig.align="center", fig.cap="Local Morans I map of Median Income"}
+# 
+#   Create Local Morans I map of income
+# 
+inc_LISA_map <- tm_shape(income_pm25) + 
+  tm_polygons(col = "income_li", 
+              title = "Local Moran's I", 
+              style = "jenks", 
+              palette = "inferno", n = 6) 
+inc_LISA_map
+```
+
+
+```{r pm25moranmap, warning=FALSE, message=FALSE, echo=FALSE, dpi = 100, fig.align="center", fig.cap="Local Morans I map of PM2.5"}
+# 
+#   Create Local Morans I map of pm2.5
+# 
+pm25_LISA_map <- tm_shape(income_pm25) + 
+  tm_polygons(col = "pm25_li", 
+              title = "Local Moran's I", 
+              style = "jenks", 
+              palette = "inferno", n = 6) 
+pm25_LISA_map
+```
+
+
+```{r krigplot, warning=FALSE, message=FALSE, echo=FALSE, dpi = 100, fig.align="center", fig.cap="Spherical Kriging Model"}
+plot(var.smpl, dat.fit) #plot fitted model
+```
+
+
+```{r krigmap, warning=FALSE, message=FALSE, echo=FALSE, dpi = 100, fig.align="center", fig.cap="Interpolated PM2.5 Kriging Surface"}
+#
+#   Create map of kriging surface
+#
+k_map <- tm_shape(kr.m) + 
+    tm_raster(n=10, palette="inferno", auto.palette.mapping=FALSE, 
+            title="PM2.5 \n(in ppm)") +
+    tm_shape(spSample) + tm_dots(size=0.1) +
+    tm_legend(legend.outside=TRUE)
+k_map
+```
+
+
+```{r varmap, warning=FALSE, message=FALSE, echo=FALSE, dpi = 100, fig.align="center", fig.cap="Interpolated PM2.5 Variance Surface"}
+#
+#   Create map of kriging surface variance
+#
+vr <- raster(dat.krg, layer="var1.var")                                   #convert kriged surface variance to a raster object
+vr.m <- mask(vr, census_tracts)                                           #mask raster with dissemenation tracts
+
+v_map <- tm_shape(vr.m) + 
+    tm_raster(n=10, palette="inferno", auto.palette.mapping=FALSE, 
+            title="PM2.5 Variance \n(in ppm)") +
+    tm_shape(spSample) + tm_dots(size=0.1) +
+    tm_legend(legend.outside=TRUE)
+v_map
+```
+
+
+Figure 12 below shows the interpolated 95% confidence PM2.5 surface over the MVA.
+
+```{r confmap, warning=FALSE, message=FALSE, echo=FALSE, dpi = 100, fig.align="center", fig.cap="95% Confidence Interpolated PM2.5 Surface"}
+#
+#   Create map of kriging surface 95% confidence interval
+#
+cr <- sqrt(raster(dat.krg, layer="var1.var")) * 1.96                     #convert kriged surface variance to a raster object
+cr.m <- mask(cr, income_pm25)                                            #mask raster with dissemenation tracts
+
+c_map <- tm_shape(cr.m) +                              
+    tm_raster(n=10, palette="inferno", auto.palette.mapping=FALSE, 
+            title="PM2.5 (95 % Confidence) \n(in ppm)") +
+    tm_shape(spSample) + tm_dots(size=0.1) +
+    tm_legend(legend.outside=TRUE)
+c_map
+```
+
+```{r resmap, warning=FALSE, message=FALSE, echo=FALSE, dpi = 100, fig.align="center", fig.cap="Linear Regression Residuals Map"}
+#
+#   Create map of Linear Regression Residuals
+#
+res_map <- tm_shape(income_tracts) +
+            tm_fill(col = "grey", alpha = ) +
+          tm_shape(pm.income.poly) + 
+            tm_polygons(col = "residuals", 
+                        title = "Linear Regression Residuals", 
+                        style = "jenks", 
+                        palette = "inferno", n = 5)
+res_map
+```
+
+```{r r2map, warning=FALSE, message=FALSE, echo=FALSE, dpi = 100, fig.align="center", fig.cap="GWR R^2 Values Map"}
+#
+#   Create map of GWR R^2 values
+#
+r2_map <- tm_shape(income_tracts) +
+            tm_fill(col = "grey", alpha = ) +
+          tm_shape(pm.income.poly) + 
+            tm_polygons(col = "localr", 
+                        title = "Geographically Weighted Regression R^2 Values", 
+                        style = "jenks", 
+                        palette = "inferno", n = 5)
+r2_map
+```
+
+
+```{r coeffmap, warning=FALSE, message=FALSE, echo=FALSE,, dpi = 100, fig.align="center", fig.cap="GWR Coefficient Values Map"}
+#
+#   Create map of GWR coefficient values
+#
+r2_map <- tm_shape(income_tracts) +
+            tm_fill(col = "grey", alpha = ) +
+          tm_shape(pm.income.poly) + 
+            tm_polygons(col = "localr", 
+                        title = "Geographically Weighted Regression Coefficient Values", 
+                        style = "jenks", 
+                        palette = "inferno", n = 5)
+r2_map
+```
+
+
+```{r kfuncplot, warning=FALSE, message=FALSE, echo=FALSE, dpi = 100, fig.align="center", fig.cap="K Function Plot"}
+#
+#   K function
+#
+kplt <- plot(K, main="K Function", las=1,
+             legendargs=list(cex=1, xpd=TRUE, inset=c(-0.1, 0)))
+```
+
+
+```{r lfuncplot, warning=FALSE, message=FALSE, echo=FALSE, dpi = 100, fig.align="center", fig.cap="L Function Plot"}
+#
+#   L function
+#
+lplt <- plot(L, main="L Function", las=1,
+             legendargs=list(cex=1, xpd=TRUE, inset=c(-0.1, 0)))
+```
+
+
+```{r knnplot, warning=FALSE, message=FALSE, echo=FALSE,, dpi = 100, fig.align="center", fig.cap="k-Nearest Neighbours Plot (k = 100)"}
+#
+#   KNN
+#
+plot(knn ~ eval(1:100), type="b", main=NULL, las=1)
+```
+
+
+
+
+
+
+
+
+

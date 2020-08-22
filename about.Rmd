@@ -1,0 +1,6 @@
+---
+author: "Connor Schultz"
+date: "December 2, 2019"
+output: html_document
+---
+This website was created for GEOG 418 Final Project.

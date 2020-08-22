@@ -1,1 +1,2 @@
-# geog418_project
+# 418-finalproject
+GEOG 418: Advanced Spatial Analysis Final Project
